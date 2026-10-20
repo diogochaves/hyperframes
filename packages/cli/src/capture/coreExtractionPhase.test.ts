@@ -8,7 +8,12 @@ import { createPartialCaptureState } from "./partialCapture.js";
 import { createCaptureDownloadBudget } from "./readBoundedResponse.js";
 import { StageBudgetTimeoutError } from "./captureTimeout.js";
 
-const control = vi.hoisted(() => ({ remaining: 10000, expireLazy: false, throwCatalog: false }));
+const control = vi.hoisted(() => ({
+  remaining: 10000,
+  expireLazy: false,
+  throwCatalog: false,
+  hangTokens: false,
+}));
 vi.mock("./lazyScrollForCapture.js", () => ({
   lazyScrollForCapture: async () => {
     if (control.expireLazy) control.remaining = 0;
@@ -22,17 +27,20 @@ vi.mock("./animationCataloger.js", () => ({
   },
 }));
 vi.mock("./tokenExtractor.js", () => ({
-  extractTokens: async () => ({
-    title: "Fixture",
-    description: "",
-    cssVariables: {},
-    fonts: [],
-    colors: [],
-    headings: [],
-    ctas: [],
-    svgs: [],
-    sections: [],
-  }),
+  extractTokens: async () =>
+    control.hangTokens
+      ? new Promise(() => {})
+      : {
+          title: "Fixture",
+          description: "",
+          cssVariables: {},
+          fonts: [],
+          colors: [],
+          headings: [],
+          ctas: [],
+          svgs: [],
+          sections: [],
+        },
 }));
 vi.mock("./designStyleExtractor.js", () => ({
   extractDesignStyles: async () => ({
@@ -71,6 +79,7 @@ afterEach(() => {
   control.remaining = 10000;
   control.expireLazy = false;
   control.throwCatalog = false;
+  control.hangTokens = false;
 });
 
 const REFUSED = "Protocol error (Page.captureScreenshot): Unable to capture screenshot";
@@ -81,6 +90,7 @@ async function extract(expireScreenshot = false, refuseShot?: number) {
   const outputDir = mkdtempSync(join(tmpdir(), "hf-core-budget-"));
   mkdirSync(join(outputDir, "extracted"));
   const state = createPartialCaptureState({ url: "https://example.com", outputDir });
+  const cdpSend = vi.fn(async (_method: string) => {});
   let shots = 0;
   const screenshot = vi.fn(async () => {
     if (++shots === refuseShot) throw new Error(REFUSED);
@@ -100,7 +110,7 @@ async function extract(expireScreenshot = false, refuseShot?: number) {
     const pending = runCoreExtraction({
       page1: page,
       chromeBrowser: {} as Browser,
-      cdp: { send: async () => {} } as never,
+      cdp: { send: cdpSend } as never,
       cdpAnims: [],
       state,
       outputDir,
@@ -132,7 +142,7 @@ async function extract(expireScreenshot = false, refuseShot?: number) {
     });
     await vi.runAllTimersAsync();
     const result = await pending;
-    return { result, warnings: state.warnings, screenshot };
+    return { result, warnings: state.warnings, screenshot, cdpSend };
   } finally {
     vi.useRealTimers();
     rmSync(outputDir, { recursive: true, force: true });
@@ -183,5 +193,17 @@ describe("core extraction screenshot budget", () => {
     expect(warnings).toContain(
       "animation catalog evaluate timed out; continuing without animation catalog",
     );
+  });
+});
+
+describe("core extraction page steps", () => {
+  it("stops a token step that never returns and still takes the screenshots", async () => {
+    control.hangTokens = true;
+    const { result, warnings, cdpSend } = await extract();
+    expect(result.timedOutSteps).toEqual(["design token extraction"]);
+    expect(warnings).toContain("design token extraction timed out; continuing without it");
+    expect(cdpSend).toHaveBeenCalledWith("Runtime.terminateExecution");
+    expect(result.screenshotOutcome).toEqual({ kind: "complete" });
+    expect(result.screenshots).toHaveLength(3);
   });
 });

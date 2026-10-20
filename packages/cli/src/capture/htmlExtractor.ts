@@ -11,14 +11,18 @@ import { safeFetch } from "./assetDownloader.js";
 import { CAPTURE_USER_AGENT } from "./userAgent.js";
 
 const DEFAULT_SETTLE_TIME = 3000;
+// page.html inlines images up to this many data-URL characters; the rest keep their absolute URL.
+// Unbounded, an image-heavy page returned a 368 MB body over CDP and the capture timed out.
+const PAGE_HTML_INLINE_IMAGE_BUDGET_CHARS = 25 * 1024 * 1024;
 
 // Pre-existing capture pipeline size — surfaced by a one-line escape fix, not new logic.
 // fallow-ignore-next-line complexity
 export async function extractHtml(
   page: Page,
-  opts: { settleTime?: number } = {},
+  opts: { settleTime?: number; inlineImageBudgetChars?: number } = {},
 ): Promise<ExtractedHtml> {
   const settleTime = opts.settleTime ?? DEFAULT_SETTLE_TIME;
+  const inlineImageBudgetChars = opts.inlineImageBudgetChars ?? PAGE_HTML_INLINE_IMAGE_BUDGET_CHARS;
 
   // Lazy-load scroll removed — index.ts already scrolls before calling extractHtml.
   // Images are loaded by the time we get here.
@@ -109,7 +113,8 @@ export async function extractHtml(
   // loaded in the browser. We convert loaded images to data URLs via canvas.
   await page.evaluate(`(async () => {
     var imgs = Array.from(document.querySelectorAll("img"));
-    for (var i = 0; i < imgs.length; i++) {
+    var inlineBudget = ${inlineImageBudgetChars};
+    for (var i = 0; i < imgs.length && inlineBudget > 100; i++) {
       var img = imgs[i];
       try {
         if (!img.src || img.src.startsWith("data:")) continue;
@@ -124,14 +129,15 @@ export async function extractHtml(
         var ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0);
         var dataUrl = canvas.toDataURL("image/png");
-        if (dataUrl.length > 100) {
+        if (dataUrl.length > 100 && dataUrl.length <= inlineBudget) {
+          inlineBudget -= dataUrl.length;
           img.setAttribute("src", dataUrl);
           img.removeAttribute("srcset");
         }
       } catch(e) {
         // Canvas CORS failed — try fetch + blob as fallback
         try {
-          var resp = await fetch(img.src, { mode: "cors" });
+          var resp = await fetch(img.src, { mode: "cors", signal: AbortSignal.timeout(5000) });
           if (resp.ok) {
             var blob = await resp.blob();
             var reader = new FileReader();
@@ -139,7 +145,8 @@ export async function extractHtml(
               reader.onloadend = function() { resolve(reader.result); };
               reader.readAsDataURL(blob);
             });
-            if (dataUrl2 && typeof dataUrl2 === "string" && dataUrl2.length > 100) {
+            if (dataUrl2 && typeof dataUrl2 === "string" && dataUrl2.length > 100 && dataUrl2.length <= inlineBudget) {
+              inlineBudget -= dataUrl2.length;
               img.setAttribute("src", dataUrl2);
               img.removeAttribute("srcset");
             }

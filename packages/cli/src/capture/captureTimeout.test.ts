@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TimeoutError } from "puppeteer-core";
 import {
   PUPPETEER_DEFAULT_PROTOCOL_TIMEOUT_MS,
@@ -7,6 +7,7 @@ import {
   formatCaptureFailureReason,
   isNavigationTimeoutError,
   isProtocolEvaluateTimeoutError,
+  runPageStep,
   withRemainingBudget,
 } from "./captureTimeout.js";
 
@@ -103,5 +104,41 @@ describe("formatCaptureFailureReason", () => {
     expect(formatCaptureFailureReason("Navigation timeout of 30000 ms exceeded")).toMatch(
       /navigation timed out/i,
     );
+  });
+});
+
+describe("runPageStep", () => {
+  it("stops the page script and reports a step that outlives its cap", async () => {
+    const stopPageScript = vi.fn(async () => {});
+    const outcome = await runPageStep(() => new Promise<never>(() => {}), {
+      label: "tokens",
+      stopPageScript,
+      capMs: 20,
+    });
+    expect(outcome).toEqual({ kind: "timed-out" });
+    expect(stopPageScript).toHaveBeenCalledOnce();
+  });
+
+  it("treats a protocol evaluate timeout as a timed-out step", async () => {
+    const outcome = await runPageStep(
+      () => Promise.reject(new Error("Runtime.evaluate timed out. Increase the 'protocolTimeout'")),
+      { label: "tokens", stopPageScript: async () => {} },
+    );
+    expect(outcome).toEqual({ kind: "timed-out" });
+  });
+
+  it("returns the value of a step that finishes and rethrows other errors", async () => {
+    const stopPageScript = vi.fn(async () => {});
+    await expect(runPageStep(async () => 7, { label: "tokens", stopPageScript })).resolves.toEqual({
+      kind: "done",
+      value: 7,
+    });
+    await expect(
+      runPageStep(() => Promise.reject(new TypeError("body is null")), {
+        label: "tokens",
+        stopPageScript,
+      }),
+    ).rejects.toThrow("body is null");
+    expect(stopPageScript).not.toHaveBeenCalled();
   });
 });

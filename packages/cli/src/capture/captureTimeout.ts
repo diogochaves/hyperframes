@@ -81,6 +81,28 @@ export async function withRemainingBudget<T>(
   }
 }
 
+const PAGE_STEP_CAP_MS = 30_000;
+
+export type PageStepOutcome<T> = { kind: "done"; value: T } | { kind: "timed-out" };
+
+/**
+ * One in-page capture step, capped so a hung page cannot spend the whole capture budget.
+ * A step that overruns is stopped in the page, so the steps after it can still run.
+ */
+export async function runPageStep<T>(
+  step: () => Promise<T>,
+  opts: { label: string; stopPageScript: () => Promise<unknown>; capMs?: number },
+): Promise<PageStepOutcome<T>> {
+  try {
+    const value = await withRemainingBudget(step(), opts.capMs ?? PAGE_STEP_CAP_MS, opts.label);
+    return { kind: "done", value };
+  } catch (err) {
+    if (!isDegradableEvaluateTimeoutError(err)) throw err;
+    await opts.stopPageScript().catch(() => undefined);
+    return { kind: "timed-out" };
+  }
+}
+
 export function formatCaptureFailureReason(errMsg: string): string {
   if (hasProtocolEvaluateTimeoutMessage(errMsg) || /stage budget exceeded/i.test(errMsg)) {
     return (

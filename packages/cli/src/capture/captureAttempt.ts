@@ -278,8 +278,11 @@ export async function captureWebsiteAttempt(
     } = coreResult);
 
     const screenshotOutcome = coreResult.screenshotOutcome;
-    if (screenshotOutcome.kind === "complete") phase("core-extraction", "completed");
-    else phase("core-extraction", "degraded", screenshotOutcome.reason);
+    if (screenshotOutcome.kind !== "complete")
+      phase("core-extraction", "degraded", screenshotOutcome.reason);
+    else if (coreResult.timedOutSteps.length > 0)
+      phase("core-extraction", "degraded", "request-timeout");
+    else phase("core-extraction", "completed");
     const postResult = await runPostExtraction({
       state,
       outputDir,
