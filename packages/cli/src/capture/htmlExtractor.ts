@@ -14,20 +14,30 @@ const DEFAULT_SETTLE_TIME = 3000;
 // page.html inlines images up to this many data-URL characters; the rest keep their absolute URL.
 // Unbounded, an image-heavy page returned a 368 MB body over CDP and the capture timed out.
 const PAGE_HTML_INLINE_IMAGE_BUDGET_CHARS = 25 * 1024 * 1024;
+// Stylesheet and image inlining stop here; the final DOM read always runs, so a slow page
+// still yields its HTML.
+const HTML_EXTRACT_TIME_BUDGET_MS = 20_000;
 
 // Pre-existing capture pipeline size — surfaced by a one-line escape fix, not new logic.
 // fallow-ignore-next-line complexity
 export async function extractHtml(
   page: Page,
-  opts: { settleTime?: number; inlineImageBudgetChars?: number } = {},
+  opts: {
+    settleTime?: number;
+    inlineImageBudgetChars?: number;
+    timeBudgetMs?: number;
+    onWarning?: (message: string) => void;
+  } = {},
 ): Promise<ExtractedHtml> {
   const settleTime = opts.settleTime ?? DEFAULT_SETTLE_TIME;
   const inlineImageBudgetChars = opts.inlineImageBudgetChars ?? PAGE_HTML_INLINE_IMAGE_BUDGET_CHARS;
+  const deadline = Date.now() + (opts.timeBudgetMs ?? HTML_EXTRACT_TIME_BUDGET_MS);
+  const msLeft = (): number => Math.max(0, deadline - Date.now());
 
   // Lazy-load scroll removed — index.ts already scrolls before calling extractHtml.
   // Images are loaded by the time we get here.
   // Settle wait kept as buffer before DOM extraction.
-  await new Promise((r) => setTimeout(r, settleTime));
+  await new Promise((r) => setTimeout(r, Math.min(settleTime, msLeft())));
 
   // Step 2: Inline external stylesheets
   // Fetch CSS from Node.js (bypasses CORS) then inject into page
@@ -35,10 +45,16 @@ export async function extractHtml(
     return Array.from(document.querySelectorAll('link[rel="stylesheet"][href]')).map(function(l) { return l.href; });
   })()`)) as string[];
 
-  for (const href of stylesheetUrls) {
+  for (const [index, href] of stylesheetUrls.entries()) {
+    if (msLeft() <= 0) {
+      opts.onWarning?.(
+        `page.html: ${stylesheetUrls.length - index} stylesheet(s) left as links; the HTML time budget ran out`,
+      );
+      break;
+    }
     try {
       const res = await safeFetch(href, {
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(Math.min(10000, msLeft())),
         headers: { "User-Agent": CAPTURE_USER_AGENT },
       });
       if (!res?.ok) {
@@ -111,10 +127,13 @@ export async function extractHtml(
   // Step 3b: Convert cross-origin images to data URLs
   // Some CDNs (Contentful, etc.) block direct access but images are already
   // loaded in the browser. We convert loaded images to data URLs via canvas.
-  await page.evaluate(`(async () => {
+  const inlining = (await page.evaluate(`(async () => {
     var imgs = Array.from(document.querySelectorAll("img"));
     var inlineBudget = ${inlineImageBudgetChars};
-    for (var i = 0; i < imgs.length && inlineBudget > 100; i++) {
+    var stopAt = Date.now() + ${msLeft()};
+    var overBudget = 0;
+    var i = 0;
+    for (; i < imgs.length && inlineBudget > 100 && Date.now() < stopAt; i++) {
       var img = imgs[i];
       try {
         if (!img.src || img.src.startsWith("data:")) continue;
@@ -129,7 +148,8 @@ export async function extractHtml(
         var ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0);
         var dataUrl = canvas.toDataURL("image/png");
-        if (dataUrl.length > 100 && dataUrl.length <= inlineBudget) {
+        if (dataUrl.length > inlineBudget) overBudget++;
+        else if (dataUrl.length > 100) {
           inlineBudget -= dataUrl.length;
           img.setAttribute("src", dataUrl);
           img.removeAttribute("srcset");
@@ -137,7 +157,10 @@ export async function extractHtml(
       } catch(e) {
         // Canvas CORS failed — try fetch + blob as fallback
         try {
-          var resp = await fetch(img.src, { mode: "cors", signal: AbortSignal.timeout(5000) });
+          var resp = await fetch(img.src, {
+            mode: "cors",
+            signal: AbortSignal.timeout(Math.max(1, Math.min(5000, stopAt - Date.now()))),
+          });
           if (resp.ok) {
             var blob = await resp.blob();
             var reader = new FileReader();
@@ -145,7 +168,8 @@ export async function extractHtml(
               reader.onloadend = function() { resolve(reader.result); };
               reader.readAsDataURL(blob);
             });
-            if (dataUrl2 && typeof dataUrl2 === "string" && dataUrl2.length > 100 && dataUrl2.length <= inlineBudget) {
+            if (typeof dataUrl2 === "string" && dataUrl2.length > inlineBudget) overBudget++;
+            else if (dataUrl2 && typeof dataUrl2 === "string" && dataUrl2.length > 100) {
               inlineBudget -= dataUrl2.length;
               img.setAttribute("src", dataUrl2);
               img.removeAttribute("srcset");
@@ -156,7 +180,18 @@ export async function extractHtml(
         }
       }
     }
-  })()`);
+    return { left: imgs.length - i, overBudget: overBudget, outOfTime: i < imgs.length && Date.now() >= stopAt };
+  })()`)) as { left: number; overBudget: number; outOfTime: boolean };
+  if (inlining.outOfTime) {
+    opts.onWarning?.(
+      `page.html: ${inlining.left} image(s) left as URLs; the HTML time budget ran out`,
+    );
+  }
+  if (inlining.overBudget > 0 || (inlining.left > 0 && !inlining.outOfTime)) {
+    opts.onWarning?.(
+      `page.html: image inlining stopped at its ${Math.round(inlineImageBudgetChars / 1024 / 1024)} MB budget; the remaining images keep their URLs`,
+    );
+  }
 
   // Step 4: Extract everything
   const result = (await page.evaluate(`(() => {

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Page, Browser } from "puppeteer-core";
-import { runCoreExtraction } from "./coreExtractionPhase.js";
+import { coreExtractionStatus, runCoreExtraction } from "./coreExtractionPhase.js";
 import { createPartialCaptureState } from "./partialCapture.js";
 import { createCaptureDownloadBudget } from "./readBoundedResponse.js";
 import { StageBudgetTimeoutError } from "./captureTimeout.js";
@@ -205,5 +205,22 @@ describe("core extraction page steps", () => {
     expect(cdpSend).toHaveBeenCalledWith("Runtime.terminateExecution");
     expect(result.screenshotOutcome).toEqual({ kind: "complete" });
     expect(result.screenshots).toHaveLength(3);
+  });
+});
+
+describe("core extraction status", () => {
+  it("reports a timed-out page step as degraded even when every screenshot landed", () => {
+    expect(
+      coreExtractionStatus({ screenshotOutcome: { kind: "complete" }, timedOutSteps: ["tokens"] }),
+    ).toEqual({ status: "degraded", reason: "request-timeout" });
+    expect(
+      coreExtractionStatus({ screenshotOutcome: { kind: "complete" }, timedOutSteps: [] }),
+    ).toEqual({ status: "completed" });
+    expect(
+      coreExtractionStatus({
+        screenshotOutcome: { kind: "partial", reason: "budget-exhausted" },
+        timedOutSteps: ["tokens"],
+      }),
+    ).toEqual({ status: "degraded", reason: "budget-exhausted" });
   });
 });

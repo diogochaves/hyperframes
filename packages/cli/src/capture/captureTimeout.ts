@@ -87,7 +87,8 @@ export type PageStepOutcome<T> = { kind: "done"; value: T } | { kind: "timed-out
 
 /**
  * One in-page capture step, capped so a hung page cannot spend the whole capture budget.
- * A step that overruns is stopped in the page, so the steps after it can still run.
+ * On overrun, a script still running in the page is terminated so later steps can run; a step
+ * awaiting the network is abandoned and may still finish later.
  */
 export async function runPageStep<T>(
   step: () => Promise<T>,

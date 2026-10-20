@@ -29,6 +29,9 @@ import { waitForPageReady } from "./navigateForCapture.js";
 import { lazyScrollForCapture } from "./lazyScrollForCapture.js";
 import { filterExtractedScripts } from "./filterExtractedScripts.js";
 
+// Above extractHtml's own 20 s inlining budget, so its final DOM read gets to run.
+const HTML_STEP_CAP_MS = 45_000;
+
 export interface CoreExtractionInput {
   page1: Page;
   chromeBrowser: Browser;
@@ -121,10 +124,16 @@ export async function runCoreExtraction(input: CoreExtractionInput): Promise<Cor
       : "--capture-budget spent before the animation catalog finished; continuing without animation catalog";
   let screenshotOutcome: CoreExtractionResult["screenshotOutcome"] = { kind: "complete" };
   const timedOutSteps: string[] = [];
-  const pageStep = async <T>(label: string, step: () => Promise<T>, fallback: T): Promise<T> => {
+  const pageStep = async <T>(
+    label: string,
+    step: () => Promise<T>,
+    fallback: T,
+    capMs?: number,
+  ): Promise<T> => {
     const outcome = await runPageStep(step, {
       label,
       stopPageScript: () => cdp.send("Runtime.terminateExecution"),
+      capMs,
     });
     if (outcome.kind === "done") return outcome.value;
     timedOutSteps.push(label);
@@ -415,8 +424,16 @@ export async function runCoreExtraction(input: CoreExtractionInput): Promise<Cor
     progress("extract", "Extracting HTML & CSS...");
     extracted = await pageStep(
       "HTML extraction",
-      () => extractHtml(page1, { settleTime: 1000 }),
+      () =>
+        extractHtml(page1, {
+          settleTime: 1000,
+          onWarning: (message) => {
+            warnings.push(message);
+            progress("warn", message);
+          },
+        }),
       extracted,
+      HTML_STEP_CAP_MS,
     );
     state.extracted = extracted;
 
@@ -501,4 +518,15 @@ export async function runCoreExtraction(input: CoreExtractionInput): Promise<Cor
     extracted,
     screenshots,
   };
+}
+
+export function coreExtractionStatus(
+  result: Pick<CoreExtractionResult, "screenshotOutcome" | "timedOutSteps">,
+):
+  | { status: "completed" }
+  | { status: "degraded"; reason: ScreenshotInterruption["reason"] | "deadline" } {
+  if (result.screenshotOutcome.kind !== "complete")
+    return { status: "degraded", reason: result.screenshotOutcome.reason };
+  if (result.timedOutSteps.length > 0) return { status: "degraded", reason: "request-timeout" };
+  return { status: "completed" };
 }

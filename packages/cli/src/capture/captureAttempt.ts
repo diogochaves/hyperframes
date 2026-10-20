@@ -30,7 +30,7 @@ import type { CaptureWatchdog } from "./captureWatchdog.js";
 
 import type { PartialCaptureState } from "./partialCapture.js";
 import { runNavigationChecks } from "./navigationPhase.js";
-import { runCoreExtraction } from "./coreExtractionPhase.js";
+import { coreExtractionStatus, runCoreExtraction } from "./coreExtractionPhase.js";
 import { runPostExtraction } from "./postExtractionPhase.js";
 
 const DEFAULT_POST_NAVIGATION_BUDGET_MS = 120_000;
@@ -278,11 +278,9 @@ export async function captureWebsiteAttempt(
     } = coreResult);
 
     const screenshotOutcome = coreResult.screenshotOutcome;
-    if (screenshotOutcome.kind !== "complete")
-      phase("core-extraction", "degraded", screenshotOutcome.reason);
-    else if (coreResult.timedOutSteps.length > 0)
-      phase("core-extraction", "degraded", "request-timeout");
-    else phase("core-extraction", "completed");
+    const core = coreExtractionStatus(coreResult);
+    if (core.status === "completed") phase("core-extraction", "completed");
+    else phase("core-extraction", "degraded", core.reason);
     const postResult = await runPostExtraction({
       state,
       outputDir,
