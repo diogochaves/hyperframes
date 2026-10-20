@@ -12,6 +12,14 @@
  */
 
 import {
+  htmlInCanvasForm,
+  markCaptureCanvas,
+  markCaptured,
+  unmarkCaptured,
+  type HtmlInCanvasForm,
+} from "../../htmlInCanvas";
+import { type DefectEnv, findCaptureDefect, scanBackfaceDefect } from "../../htmlInCanvasDefects";
+import {
   PAGE_DEVICE_SCALE_GLOBAL,
   PAGE_MOTION_BLUR_OFF_GLOBAL,
   supportsCaptureMotionBlur,
@@ -125,16 +133,8 @@ export function trackAcceleratedCanvases(): void {
   });
 }
 
-/** What in the composition the capture cannot take, checked again per frame (scripts add canvases). */
-function captureBlocker(root: HTMLElement): string | null {
-  // A capture canvas inside another one blocks the renderer's main thread.
-  if (root.querySelector("canvas[layoutsubtree]"))
-    return "the composition already uses html-in-canvas";
-  for (const canvas of root.querySelectorAll("canvas")) {
-    if (acceleratedCanvases.has(canvas))
-      return "the composition draws a WebGL/WebGPU canvas, which html-in-canvas captures frozen";
-  }
-  return null;
+function defectEnv(backface: boolean): DefectEnv {
+  return { isAccelerated: (canvas) => acceleratedCanvases.has(canvas), backface };
 }
 
 function unsupportedReason(root: HTMLElement): string | null {
@@ -143,7 +143,7 @@ function unsupportedReason(root: HTMLElement): string | null {
   if (!supportsCaptureMotionBlur()) {
     return "html-in-canvas (drawElementImage) is unavailable in this browser";
   }
-  return captureBlocker(root);
+  return findCaptureDefect(root, defectEnv(scanBackfaceDefect(root)))?.reason ?? null;
 }
 
 function describe(el: Element): string {
@@ -178,13 +178,13 @@ function makeCanvas(width: number, height: number, role: string): HTMLCanvasElem
   return canvas;
 }
 
-function createInstance(host: CaptureMotionBlurHost, config: Config) {
+function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlInCanvasForm) {
   const { root } = host;
   const { width, height } = rootSize(root);
   const src = makeCanvas(width, height, "capture") as PaintCanvas;
   const out = makeCanvas(width, height, "output");
   out.style.pointerEvents = "none";
-  src.setAttribute("layoutsubtree", "");
+  markCaptureCanvas(src, form);
 
   const captureContext = src.getContext("2d") as DrawElementContext | null;
   const outputContext = out.getContext("2d");
@@ -210,6 +210,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
   let sampleMs = 0;
   let scanMs = 0;
   let scannedTimeline: unknown = undefined;
+  let backface = false;
   let wrapped = false;
   // The output still shows the last frame of the previous wrap until this one draws.
   let staleOutput = false;
@@ -220,6 +221,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
     if (wrapped) return;
     root.before(src);
     src.append(root);
+    markCaptured(root, form);
     src.after(out);
     document.head.append(hideRule);
     wrapped = true;
@@ -238,6 +240,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
     if (!wrapped) return;
     wrapped = false;
     hideRule.remove();
+    unmarkCaptured(root, form);
     src.before(root);
     src.remove();
     out.remove();
@@ -247,6 +250,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
 
   function discover(restoreTo: number): void {
     scannedTimeline = host.timeline();
+    backface = scanBackfaceDefect(root);
     const s0 = performance.now();
     const found = discoverMovers({
       scene: root,
@@ -431,9 +435,9 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
       }
       // Checked again here, not only at init: a block's script can add its own capture canvas
       // (wrapping one inside ours hangs the renderer) or a WebGL canvas later.
-      const blocked = captureBlocker(root);
+      const blocked = findCaptureDefect(root, defectEnv(backface));
       if (blocked) {
-        disable(blocked);
+        disable(blocked.reason);
         return Promise.resolve();
       }
       wrap();
@@ -540,8 +544,9 @@ export function initCaptureMotionBlur(host: CaptureMotionBlurHost): void {
     instance.rediscover();
     return;
   }
+  const form = htmlInCanvasForm();
   const reason = unsupportedReason(host.root);
-  if (reason) {
+  if (!form || reason) {
     console.info(`[motion-blur] off: ${reason}`);
     w.__hfMotionBlur = {
       report: () => ({
@@ -558,7 +563,7 @@ export function initCaptureMotionBlur(host: CaptureMotionBlurHost): void {
     };
     return;
   }
-  instance = createInstance(host, config);
+  instance = createInstance(host, config, form);
   const current = instance;
   w.__hfMotionBlur = { report: () => current.report() };
 }
