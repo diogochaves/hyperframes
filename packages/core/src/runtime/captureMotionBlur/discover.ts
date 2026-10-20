@@ -37,6 +37,7 @@ export interface DiscoverOptions {
   fps: number;
   /** Seek the composition (timeline + adapters) to a time. */
   seek: (t: number) => void;
+  onStep?: (i: number, steps: number) => void;
 }
 
 export interface Discovery {
@@ -119,10 +120,18 @@ function edgeShift(a: DOMRect | undefined, b: DOMRect | undefined): number {
   );
 }
 
-export function discoverMovers({ scene, durationSeconds, fps, seek }: DiscoverOptions): Discovery {
+export function discoverMovers({
+  scene,
+  durationSeconds,
+  fps,
+  seek,
+  onStep,
+}: DiscoverOptions): Discovery {
+  seek(0);
   const all = [...scene.querySelectorAll("*")].filter(isHtmlElement);
   const dynamic = new Set<Element>(pageAnimated(scene));
   const first = all.map(styleKey);
+  const baseRects = all.map((el) => el.getBoundingClientRect());
   const frames = Math.max(1, Math.round(durationSeconds * fps));
   // One pass, about every other frame on a typical composition. A whip shorter than one step
   // can be under-measured; ponytail: raise SCAN_STEPS if a fast move goes unblurred.
@@ -136,11 +145,15 @@ export function discoverMovers({ scene, durationSeconds, fps, seek }: DiscoverOp
   let prev: Array<DOMRect | undefined> | null = null;
 
   for (let i = 0; i <= steps; i++) {
-    seek((i / steps) * durationSeconds);
-    // Rects only for elements whose style has changed; the first read flushes layout once.
+    if (i > 0) seek((i / steps) * durationSeconds);
+    onStep?.(i, steps);
+    // Rects only for elements whose style has changed; until then they sit where t=0 put them.
     const rects: Array<DOMRect | undefined> = [];
     all.forEach((el, j) => {
-      if (!dynamic.has(el) && styleKey(el) === first[j]) return;
+      if (!dynamic.has(el) && styleKey(el) === first[j]) {
+        rects[j] = baseRects[j];
+        return;
+      }
       dynamic.add(el);
       rects[j] = el.getBoundingClientRect();
       if (edgeShift(prev?.[j], rects[j]) / framesPerStep < MIN_SPEED) return;

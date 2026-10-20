@@ -266,6 +266,99 @@ describe("opt-in and off switches", () => {
     expect(win.__hfMotionBlur?.report().reason).toMatch(/backface-visibility/);
   });
 
+  it("blocks from the first frame a root that only starts tweening later", () => {
+    installHtmlInCanvas();
+    for (const late of [
+      (root: HTMLElement) => (root.style.transform = "translateX(8px)"),
+      (root: HTMLElement) => (root.style.opacity = "0.4"),
+    ]) {
+      const { root, h } = movingHost();
+      const slide = h.seek;
+      initCaptureMotionBlur({
+        ...h,
+        seek: (t, quiet) => {
+          slide(t, quiet);
+          if (t >= 0.7) late(root);
+          else root.removeAttribute("style");
+        },
+      });
+      void paintCaptureMotionBlur(0, { engineMode: true });
+      expect(root.parentElement).toBe(document.body);
+      expect(win.__hfMotionBlur?.report()).toMatchObject({
+        state: "off",
+        reason: expect.stringMatching(/root.*first seen at t=0\.[7-9]s/),
+      });
+      resetCaptureMotionBlurForTests();
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("restores the playhead after a scan that blocked", () => {
+    installHtmlInCanvas();
+    const { root, h } = movingHost();
+    initCaptureMotionBlur({
+      ...h,
+      seek: (t, quiet) => {
+        h.seek(t, quiet);
+        root.style.opacity = t > 0.5 ? "0.5" : "1";
+      },
+    });
+    void paintCaptureMotionBlur(0.25, { engineMode: true });
+    expect(h.seek.mock.calls.at(-1)?.[0]).toBeCloseTo(0.25);
+    expect(win.__hfMotionBlur?.report().state).toBe("off");
+  });
+
+  it("sees a rotation that a later tween puts on a face with no 3D context at the start", () => {
+    installHtmlInCanvas();
+    const { root, h } = movingHost();
+    const face = document.createElement("div");
+    face.setAttribute("style", "backface-visibility: hidden");
+    root.append(face);
+    initCaptureMotionBlur({
+      ...h,
+      seek: (t, quiet) => {
+        h.seek(t, quiet);
+        face.style.transform = t > 0.5 ? "rotateY(120deg)" : "none";
+      },
+    });
+    void paintCaptureMotionBlur(0, { engineMode: true });
+    expect(root.parentElement).toBe(document.body);
+    expect(win.__hfMotionBlur?.report().reason).toMatch(/backface-visibility.*first seen/);
+  });
+
+  it("keeps blurring around a flat backface-hidden element that moves in 2D", () => {
+    installHtmlInCanvas();
+    const { root, h } = movingHost();
+    const face = document.createElement("div");
+    face.setAttribute("style", "backface-visibility: hidden");
+    root.append(face);
+    initCaptureMotionBlur({
+      ...h,
+      seek: (t, quiet) => {
+        h.seek(t, quiet);
+        face.style.transform = `translateX(${t * 50}px)`;
+      },
+    });
+    void paintCaptureMotionBlur(0.5, { engineMode: true });
+    expect(root.parentElement).toBe(captureCanvas(root));
+    expect(win.__hfMotionBlur?.report().state).toBe("on");
+  });
+
+  it("still catches, per frame, a WebGL canvas added after a clean scan", () => {
+    installHtmlInCanvas();
+    trackAcceleratedCanvases();
+    const { root, h } = movingHost();
+    initCaptureMotionBlur(h);
+    void paintCaptureMotionBlur(0.5, { engineMode: true });
+    expect(win.__hfMotionBlur?.report().state).toBe("on");
+    const late = document.createElement("canvas");
+    root.append(late);
+    late.getContext("webgl2");
+    void paintCaptureMotionBlur(0.6, { engineMode: true });
+    expect(win.__hfMotionBlur?.report().reason).toMatch(/WebGL/);
+    expect(console.info).toHaveBeenCalledWith(expect.stringContaining("backstop"));
+  });
+
   it("clamps the shutter angle", () => {
     installHtmlInCanvas();
     const root = makeRoot({ "data-motion-blur": "on", "data-motion-blur-shutter": "9999" });

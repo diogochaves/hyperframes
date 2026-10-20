@@ -18,7 +18,14 @@ import {
   unmarkCaptured,
   type HtmlInCanvasForm,
 } from "../../htmlInCanvas";
-import { type DefectEnv, findCaptureDefect, scanBackfaceDefect } from "../../htmlInCanvasDefects";
+import {
+  type CaptureDefect,
+  type DefectEnv,
+  chromeMajor,
+  createDefectScan,
+  findCaptureDefect,
+  scanBackfaceDefect,
+} from "../../htmlInCanvasDefects";
 import {
   PAGE_DEVICE_SCALE_GLOBAL,
   PAGE_MOTION_BLUR_OFF_GLOBAL,
@@ -133,9 +140,7 @@ export function trackAcceleratedCanvases(): void {
   });
 }
 
-function defectEnv(backface: boolean): DefectEnv {
-  return { isAccelerated: (canvas) => acceleratedCanvases.has(canvas), backface };
-}
+const isAccelerated: DefectEnv["isAccelerated"] = (canvas) => acceleratedCanvases.has(canvas);
 
 function unsupportedReason(root: HTMLElement): string | null {
   const off = (window as unknown as Record<string, unknown>)[PAGE_MOTION_BLUR_OFF_GLOBAL];
@@ -143,7 +148,9 @@ function unsupportedReason(root: HTMLElement): string | null {
   if (!supportsCaptureMotionBlur()) {
     return "html-in-canvas (drawElementImage) is unavailable in this browser";
   }
-  return findCaptureDefect(root, defectEnv(scanBackfaceDefect(root)))?.reason ?? null;
+  return (
+    findCaptureDefect(root, { isAccelerated, backface: scanBackfaceDefect(root) })?.reason ?? null
+  );
 }
 
 function describe(el: Element): string {
@@ -210,7 +217,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
   let sampleMs = 0;
   let scanMs = 0;
   let scannedTimeline: unknown = undefined;
-  let backface = false;
+  let scanDefect: CaptureDefect | null = null;
   let wrapped = false;
   // The output still shows the last frame of the previous wrap until this one draws.
   let staleOutput = false;
@@ -250,15 +257,18 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
 
   function discover(restoreTo: number): void {
     scannedTimeline = host.timeline();
-    backface = scanBackfaceDefect(root);
+    const duration = host.durationSeconds();
+    const defects = createDefectScan(root, isAccelerated);
     const s0 = performance.now();
     const found = discoverMovers({
       scene: root,
-      durationSeconds: host.durationSeconds(),
+      durationSeconds: duration,
       fps: host.fps,
       seek,
+      onStep: (i, steps) => defects.sample(i, steps, (i / steps) * duration),
     });
     seek(restoreTo);
+    scanDefect = defects.result();
     movers = found.movers;
     reader = createPoseReader(root, found.dynamic);
     scanMs = Math.round(performance.now() - s0);
@@ -425,18 +435,26 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
     staleOutput = true;
   }
 
+  /** Scan when the timeline is new; true when the scan found a defect (blur is then off). */
+  function blockedByScan(t: number): boolean {
+    if (!reader || host.timeline() !== scannedTimeline) discover(t);
+    if (scanDefect) disable(scanDefect.reason);
+    return disabled !== null;
+  }
+
   function start(t: number, engineMode: boolean): Promise<void> {
     try {
       syncDensity();
-      if (!reader || host.timeline() !== scannedTimeline) discover(t);
+      if (blockedByScan(t)) return Promise.resolve();
       if (movers.length === 0) {
         unwrap();
         return Promise.resolve();
       }
-      // Checked again here, not only at init: a block's script can add its own capture canvas
-      // (wrapping one inside ours hangs the renderer) or a WebGL canvas later.
-      const blocked = findCaptureDefect(root, defectEnv(backface));
+      // Backstop only: the scan decided the timeline, but a script can still add a capture canvas
+      // (wrapping one inside ours hangs the renderer) or a WebGL canvas outside the timeline.
+      const blocked = findCaptureDefect(root, { isAccelerated, backface: false });
       if (blocked) {
+        console.info(`[motion-blur] backstop: ${blocked.code} appeared after a clean scan`);
         disable(blocked.reason);
         return Promise.resolve();
       }
@@ -547,7 +565,7 @@ export function initCaptureMotionBlur(host: CaptureMotionBlurHost): void {
   const form = htmlInCanvasForm();
   const reason = unsupportedReason(host.root);
   if (!form || reason) {
-    console.info(`[motion-blur] off: ${reason}`);
+    console.info(`[motion-blur] off: ${reason} (Chrome ${chromeMajor() ?? "unknown"})`);
     w.__hfMotionBlur = {
       report: () => ({
         state: "off",

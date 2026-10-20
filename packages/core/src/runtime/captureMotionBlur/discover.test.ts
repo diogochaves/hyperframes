@@ -41,6 +41,47 @@ describe("discoverMovers", () => {
     expect(movers).toEqual([fast]);
   });
 
+  // A 100 px jump inside one scan step at 5 s: slow to a still-style baseline, fast between two steps.
+  function jumpScene() {
+    const scene = document.createElement("div");
+    const jumper = element(scene, "jumper");
+    const seek = (t: number): void => {
+      jumper.style.transform = `translateX(${100 * Math.min(1, Math.max(0, (t - 5) / 0.04))}px)`;
+    };
+    return { scene, jumper, seek };
+  }
+
+  it("finds the same movers whatever time the scan is started at", () => {
+    const found = [0, 3, 7].map((start) => {
+      const { scene, jumper, seek } = jumpScene();
+      seek(start);
+      const { movers } = discoverMovers({ scene, durationSeconds: 10, fps: 30, seek });
+      return movers.map((m) => m === jumper);
+    });
+    expect(found).toEqual([[true], [true], [true]]);
+  });
+
+  it("reports each scan step after its seek, in order, without seeking more", () => {
+    const { scene, seek } = setup();
+    const events: string[] = [];
+    const plain = vi.fn(seek);
+    discoverMovers({ scene, durationSeconds: 1, fps: 30, seek: plain });
+    const traced = vi.fn((t: number) => {
+      events.push(`seek ${t.toFixed(3)}`);
+      seek(t);
+    });
+    discoverMovers({
+      scene,
+      durationSeconds: 1,
+      fps: 30,
+      seek: traced,
+      onStep: (i, steps) => events.push(`step ${i}/${steps}`),
+    });
+    expect(traced.mock.calls.length).toBe(plain.mock.calls.length);
+    expect(events.slice(0, 4)).toEqual(["seek 0.000", "step 0/30", "seek 0.033", "step 1/30"]);
+    expect(events.at(-1)).toBe("step 30/30");
+  });
+
   it("marks every changing element dynamic, slow and opted-out ones included", () => {
     const { scene, fast, fastChild, slow, still, off, seek } = setup();
     const { dynamic } = discoverMovers({ scene, durationSeconds: 1, fps: 30, seek });

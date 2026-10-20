@@ -17,87 +17,65 @@ export interface DefectEnv {
   isAccelerated: (canvas: HTMLCanvasElement) => boolean;
   /** Result of `scanBackfaceDefect`, refreshed whenever the scene is rescanned. */
   backface: boolean;
-  win?: UaWindow;
 }
 
+// Every defect blocks on every Chrome version: render and preview browsers can differ.
 interface Defect {
   code: string;
   reason: string;
-  /** Chrome majors the defect applies to; null bounds are open. */
-  from: number | null;
-  until: number | null;
   detect: (root: HTMLElement, env: DefectEnv) => boolean;
 }
 
 const hasHidden3dFace = (_root: HTMLElement, env: DefectEnv): boolean => env.backface;
 
+// The whole document: a render's shader-transition canvas sits in <body>, preview's in the root.
 const hasAcceleratedCanvas = (root: HTMLElement, env: DefectEnv): boolean =>
-  Array.from(root.querySelectorAll("canvas")).some(env.isAccelerated);
+  Array.from(root.ownerDocument.querySelectorAll("canvas")).some(env.isAccelerated);
+
+const IDENTITY_TRANSFORM =
+  /^matrix\(\s*1,\s*0,\s*0,\s*1,\s*0,\s*0\s*\)$|^matrix3d\(\s*1,\s*0,\s*0,\s*0,\s*0,\s*1,\s*0,\s*0,\s*0,\s*0,\s*1,\s*0,\s*0,\s*0,\s*0,\s*1\s*\)$/;
 
 const hasRootTransform = (root: HTMLElement): boolean => {
-  const t = getComputedStyle(root).transform;
-  return t !== "none" && t !== "";
+  const t = getComputedStyle(root).transform.trim();
+  return t !== "none" && t !== "" && !IDENTITY_TRANSFORM.test(t);
 };
 
 const hasRootOpacity = (root: HTMLElement): boolean =>
   Number.parseFloat(getComputedStyle(root).opacity) < 1;
 
-// Chrome <=156 captures a WebGL canvas frozen at its pre-wrap frame; 157 fixed it.
 const DEFECTS: readonly Defect[] = [
   {
     code: "nested-capture-canvas",
     reason: "the composition already uses html-in-canvas",
-    from: null,
-    until: null,
     detect: (root) => root.querySelector(CAPTURE_CANVAS_SELECTOR) !== null,
   },
   {
+    // Chrome <=156 captures the canvas frozen at its pre-wrap frame; 157 fixed it.
     code: "accelerated-canvas",
     reason: "the composition draws a WebGL/WebGPU canvas, which html-in-canvas captures frozen",
-    from: null,
-    until: 157,
     detect: hasAcceleratedCanvas,
   },
   {
     code: "backface-visibility",
     reason: "backface-visibility: hidden inside a 3D transform is drawn mirrored by html-in-canvas",
-    from: null,
-    until: null,
     detect: hasHidden3dFace,
   },
   {
     code: "root-transform",
-    reason: "html-in-canvas ignores a transform on the composition root in this Chrome version",
-    from: null,
-    until: 157,
+    reason: "html-in-canvas can ignore a transform on the composition root",
     detect: hasRootTransform,
   },
   {
     code: "root-opacity",
-    reason: "html-in-canvas ignores the composition root's own opacity in this Chrome version",
-    from: 155,
-    until: null,
+    reason: "html-in-canvas can ignore the composition root's own opacity",
     detect: hasRootOpacity,
   },
 ];
 
-function applies(defect: Defect, major: number | null): boolean {
-  if (major === null) return true;
-  return (
-    (defect.from === null || major >= defect.from) &&
-    (defect.until === null || major < defect.until)
-  );
-}
-
-/** The first defect that makes html-in-canvas capture this root wrongly in this browser, or null. */
+/** The first defect that makes html-in-canvas capture this root wrongly in any supported browser, or null. */
 export function findCaptureDefect(root: HTMLElement, env: DefectEnv): CaptureDefect | null {
-  const major = chromeMajor(env.win);
-  for (const defect of DEFECTS) {
-    if (applies(defect, major) && defect.detect(root, env)) {
-      return { code: defect.code, reason: defect.reason };
-    }
-  }
-  return null;
+  const defect = DEFECTS.find((d) => d.detect(root, env));
+  return defect ? { code: defect.code, reason: defect.reason } : null;
 }
 
 const FACE_3D_TRANSFORM = /perspective\(|rotate3d\(|rotate[XY]\(|matrix3d\(/;
@@ -148,28 +126,57 @@ function matching(root: HTMLElement, selector: string): HTMLElement[] {
   }
 }
 
-function backfaceCandidates(root: HTMLElement): Set<HTMLElement> {
-  const found = new Set<HTMLElement>(root.querySelectorAll<HTMLElement>('[style*="backface"]'));
+function hiddenSelectors(): string[] {
+  const out: string[] = [];
   for (const sheet of Array.from(document.styleSheets)) {
     const rules = sheetRules(sheet);
     if (!rules) continue;
-    for (const rule of styleRules(rules)) {
-      if (!isHidden(rule.style)) continue;
-      for (const el of matching(root, rule.selectorText)) found.add(el);
-    }
+    for (const rule of styleRules(rules)) if (isHidden(rule.style)) out.push(rule.selectorText);
   }
-  return found;
+  return out;
 }
 
 /**
- * A `backface-visibility: hidden` element in a 3D context (preserve-3d, perspective or a 3D
- * transform), which html-in-canvas draws anyway. Flat uses are a harmless performance hack.
- * Residual: a rotation that only appears later, via a tween on an element with no 3D context at
- * scan time, is not seen.
+ * Whether a `backface-visibility: hidden` element is in a 3D context right now (flat uses are
+ * harmless); call it at several timeline times to see a rotation that a later tween applies.
  */
+function createBackfaceCheck(root: HTMLElement): () => boolean {
+  const selectors = hiddenSelectors();
+  return () => {
+    const candidates = new Set<HTMLElement>(root.querySelectorAll('[style*="backface"]'));
+    for (const selector of selectors) for (const el of matching(root, selector)) candidates.add(el);
+    for (const el of candidates) {
+      if (isHidden(getComputedStyle(el)) && in3dContext(el, root)) return true;
+    }
+    return false;
+  };
+}
+
 export function scanBackfaceDefect(root: HTMLElement): boolean {
-  for (const el of backfaceCandidates(root)) {
-    if (isHidden(getComputedStyle(el)) && in3dContext(el, root)) return true;
-  }
-  return false;
+  return createBackfaceCheck(root)();
+}
+
+const FACE_EVERY = 10;
+
+export interface DefectScan {
+  sample: (i: number, steps: number, at: number) => void;
+  result: () => CaptureDefect | null;
+}
+
+export function createDefectScan(
+  root: HTMLElement,
+  isAccelerated: DefectEnv["isAccelerated"],
+): DefectScan {
+  const faces = createBackfaceCheck(root);
+  let found: CaptureDefect | null = null;
+  return {
+    sample: (i, steps, at) => {
+      if (found) return;
+      const checkFaces = i % FACE_EVERY === 0 || i === steps;
+      const defect = findCaptureDefect(root, { isAccelerated, backface: checkFaces && faces() });
+      if (defect)
+        found = { ...defect, reason: `${defect.reason} (first seen at t=${at.toFixed(1)}s)` };
+    },
+    result: () => found,
+  };
 }
