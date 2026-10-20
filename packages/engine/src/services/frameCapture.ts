@@ -40,7 +40,7 @@ import {
   resolveMotionBlurPlan,
   type MotionBlurPlan,
 } from "./motionBlur.js";
-import { installPageMotionBlur } from "./pageMotionBlur.js";
+import { describePageMotionBlur, installPageMotionBlur } from "./pageMotionBlur.js";
 
 // ── Extracted modules ───────────────────────────────────────────────────────
 import {
@@ -4352,6 +4352,10 @@ async function captureFrameCore(
     session.capturePerf.screenshotMs += screenshotMs;
     session.capturePerf.totalMs += captureTimeMs;
     session.capturePerf.frameMs.push(captureTimeMs);
+    if (session.capturePerf.frames === 1) {
+      const blur = await describePageMotionBlur(session.page).catch(() => null);
+      if (blur) console.log(blur);
+    }
 
     // Retain this freshly-captured buffer so the following static frames can reuse it.
     if (session.staticFrames) {

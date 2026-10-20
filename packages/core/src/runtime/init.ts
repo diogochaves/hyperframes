@@ -3677,6 +3677,7 @@ export function initSandboxRuntimeModular(): void {
         Number(root.getAttribute("data-duration")) ||
         0,
       timeline: () => state.capturedTimeline,
+      now: () => Math.max(0, state.currentTime || 0),
       seek: (t, suppressEvents) => {
         seekRootChildrenAndAdapters(state.capturedTimeline, t, { suppressEvents });
       },

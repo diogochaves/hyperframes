@@ -40,3 +40,19 @@ export async function installPageMotionBlur(
     off,
   );
 }
+
+/** One line saying what the page's blur did for this session; null when the page never asked for blur. */
+export async function describePageMotionBlur(page: Pick<Page, "evaluate">): Promise<string | null> {
+  const r = await page.evaluate(() => {
+    const api: unknown = Reflect.get(window, "__hfMotionBlur");
+    const report: unknown = api && typeof api === "object" ? Reflect.get(api, "report") : null;
+    const got: unknown = typeof report === "function" ? report() : null;
+    if (!got || typeof got !== "object") return null;
+    return {
+      state: String(Reflect.get(got, "state")),
+      code: String(Reflect.get(got, "reasonCode")),
+      movers: Number(Reflect.get(got, "movers")),
+    };
+  });
+  return r && `[motion-blur] ${r.state} reasonCode=${r.code} movers=${r.movers}`;
+}

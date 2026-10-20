@@ -84,7 +84,7 @@ function host(
   root: HTMLElement,
   seek = vi.fn(),
 ): CaptureMotionBlurHost & { seek: ReturnType<typeof vi.fn> } {
-  return { root, fps: 30, durationSeconds: () => 1, timeline: () => "tl", seek };
+  return { root, fps: 30, durationSeconds: () => 1, timeline: () => "tl", now: () => 0, seek };
 }
 
 const captureCanvas = (root: HTMLElement) => root.parentElement as HTMLCanvasElement;
@@ -784,5 +784,116 @@ describe("device pixel ratio", () => {
     vi.stubGlobal("devicePixelRatio", 2);
     void paintCaptureMotionBlur(0.6, PLAY);
     expect(captureCanvas(root).width).toBe(1280);
+  });
+});
+
+describe("probe", () => {
+  const probe = () => {
+    const api = win.__hfMotionBlur;
+    if (!api) throw new Error("no __hfMotionBlur");
+    return api.probe();
+  };
+
+  it("finds the movers without any paint, wrap or event and puts the playhead back", () => {
+    installHtmlInCanvas();
+    const { root, h } = movingHost();
+    initCaptureMotionBlur({ ...h, now: () => 0.4 });
+    expect(win.__hfMotionBlur?.report().moverNames).toEqual([]);
+    const report = probe();
+    expect(report).toMatchObject({
+      state: "on",
+      reason: null,
+      reasonCode: null,
+      moverNames: ["div#slider"],
+    });
+    expect(h.seek.mock.calls.at(-1)?.[0]).toBeCloseTo(0.4);
+    expect(root.parentElement).toBe(document.body);
+    expect(document.querySelector("canvas")).toBeNull();
+  });
+
+  it("reports no movers for a composition where nothing moves", () => {
+    installHtmlInCanvas();
+    initCaptureMotionBlur(host(makeRoot()));
+    expect(probe()).toMatchObject({ state: "on", movers: 0 });
+  });
+
+  it("does not rescan on a second call, but does when the timeline changes", () => {
+    installHtmlInCanvas();
+    const { h } = movingHost();
+    let tl = "a";
+    initCaptureMotionBlur({ ...h, timeline: () => tl });
+    probe();
+    const seeks = h.seek.mock.calls.length;
+    probe();
+    expect(h.seek.mock.calls.length).toBe(seeks);
+    tl = "b";
+    probe();
+    expect(h.seek.mock.calls.length).toBeGreaterThan(seeks);
+  });
+
+  it("reports the defect a scan finds, with its code, and a later frame stays plain", () => {
+    installHtmlInCanvas();
+    const { root, h } = movingHost();
+    initCaptureMotionBlur({
+      ...h,
+      seek: (t, quiet) => {
+        h.seek(t, quiet);
+        root.style.opacity = t > 0.5 ? "0.5" : "1";
+      },
+    });
+    expect(probe()).toMatchObject({ state: "off", reasonCode: "root-opacity" });
+    expect(probe().reasonCode).toBe("root-opacity");
+    void paintCaptureMotionBlur(0.5, { engineMode: true });
+    expect(root.parentElement).toBe(document.body);
+  });
+
+  it("carries the code of a static defect and of an unsupported browser", () => {
+    installHtmlInCanvas();
+    const root = makeRoot();
+    root.innerHTML =
+      '<div style="transform-style: preserve-3d"><div style="backface-visibility: hidden"></div></div>';
+    initCaptureMotionBlur(host(root));
+    expect(probe()).toMatchObject({ state: "off", reasonCode: "backface-visibility" });
+
+    resetCaptureMotionBlurForTests();
+    vi.unstubAllGlobals();
+    delete win.__hfMotionBlur;
+    initCaptureMotionBlur(host(makeRoot()));
+    expect(probe()).toMatchObject({ state: "off", reasonCode: "unsupported-browser" });
+  });
+
+  it("does not scan again once blur is off, even when a rescan was requested", () => {
+    installHtmlInCanvas();
+    const { h } = movingHost();
+    initCaptureMotionBlur(h);
+    captureContext()?.drawElementImage.mockImplementation(() => {
+      throw new Error("boom");
+    });
+    for (let i = 0; i < 3; i++) {
+      void paintCaptureMotionBlur(0.5, PLAY);
+      document.querySelector("canvas")?.dispatchEvent(new Event("paint"));
+    }
+    initCaptureMotionBlur(h);
+    const seeks = h.seek.mock.calls.length;
+    expect(probe()).toMatchObject({ state: "off", reasonCode: "capture-failures" });
+    expect(h.seek.mock.calls.length).toBe(seeks);
+  });
+
+  it("reports capture-failures after three failed frames", () => {
+    installHtmlInCanvas();
+    const { h } = movingHost();
+    initCaptureMotionBlur(h);
+    captureContext()?.drawElementImage.mockImplementation(() => {
+      throw new Error("boom");
+    });
+    for (let i = 0; i < 3; i++) {
+      void paintCaptureMotionBlur(0.5, PLAY);
+      const canvas = document.querySelector("canvas");
+      canvas?.dispatchEvent(new Event("paint"));
+    }
+    expect(win.__hfMotionBlur?.report()).toMatchObject({
+      state: "off",
+      reasonCode: "capture-failures",
+    });
   });
 });

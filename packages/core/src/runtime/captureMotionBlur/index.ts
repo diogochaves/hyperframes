@@ -42,6 +42,7 @@ export interface CaptureMotionBlurHost {
   durationSeconds: () => number;
   /** The bound root timeline; movers are re-scanned when it changes. */
   timeline: () => unknown;
+  now: () => number;
   /** Seek the timeline and adapters (not media) for a pose read. */
   seek: (t: number, suppressEvents: boolean) => void;
 }
@@ -55,6 +56,7 @@ interface Config {
 interface Report {
   state: "on" | "off";
   reason: string | null;
+  reasonCode: string | null;
   movers: number;
   /** The blurred elements, as `tag#id.class`, for diagnosing what was (not) picked. */
   moverNames: string[];
@@ -71,7 +73,7 @@ type DrawElementContext = CanvasRenderingContext2D & {
 };
 type PaintCanvas = HTMLCanvasElement & { requestPaint: () => void };
 type CompositeWindow = Window & {
-  __hfMotionBlur?: { report: () => Report };
+  __hfMotionBlur?: { report: () => Report; probe: () => Report };
   __hf_page_composite_pending?: boolean;
   __hf_page_composite_resolve?: () => boolean;
 };
@@ -142,15 +144,16 @@ export function trackAcceleratedCanvases(): void {
 
 const isAccelerated: DefectEnv["isAccelerated"] = (canvas) => acceleratedCanvases.has(canvas);
 
-function unsupportedReason(root: HTMLElement): string | null {
+function unsupported(root: HTMLElement): CaptureDefect | null {
   const off = (window as unknown as Record<string, unknown>)[PAGE_MOTION_BLUR_OFF_GLOBAL];
-  if (off) return `the renderer turned it off (${String(off)})`;
+  if (off) return { code: "renderer-off", reason: `the renderer turned it off (${String(off)})` };
   if (!supportsCaptureMotionBlur()) {
-    return "html-in-canvas (drawElementImage) is unavailable in this browser";
+    return {
+      code: "unsupported-browser",
+      reason: "html-in-canvas (drawElementImage) is unavailable in this browser",
+    };
   }
-  return (
-    findCaptureDefect(root, { isAccelerated, backface: scanBackfaceDefect(root) })?.reason ?? null
-  );
+  return findCaptureDefect(root, { isAccelerated, backface: scanBackfaceDefect(root) });
 }
 
 function describe(el: Element): string {
@@ -213,6 +216,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
   let seq = 0;
   let failures = 0;
   let disabled: string | null = null;
+  let disabledCode: string | null = null;
   const timings: number[] = [];
   let sampleMs = 0;
   let scanMs = 0;
@@ -344,7 +348,8 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
     swallow("runtime.captureMotionBlur.compose", err);
     // A render never gives up mid-video: this frame shows the plain DOM, the next wraps again.
     if (rendering) unwrap();
-    else if (failures >= MAX_FAILURES) disable(`capture failed ${failures} times in a row`);
+    else if (failures >= MAX_FAILURES)
+      disable(`capture failed ${failures} times in a row`, "capture-failures");
   }
 
   /** This paint's half of the frame; false when the background capture is still to come. */
@@ -387,9 +392,10 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
 
   src.addEventListener("paint", onPaint);
 
-  function disable(reason: string): void {
+  function disable(reason: string, code: string): void {
     if (disabled) return;
     disabled = reason;
+    disabledCode = code;
     console.warn(`[motion-blur] off: ${reason}`);
     teardown();
   }
@@ -438,7 +444,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
   /** Scan when the timeline is new; true when the scan found a defect (blur is then off). */
   function blockedByScan(t: number): boolean {
     if (!reader || host.timeline() !== scannedTimeline) discover(t);
-    if (scanDefect) disable(scanDefect.reason);
+    if (scanDefect) disable(scanDefect.reason, scanDefect.code);
     return disabled !== null;
   }
 
@@ -455,7 +461,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
       const blocked = findCaptureDefect(root, { isAccelerated, backface: false });
       if (blocked) {
         console.info(`[motion-blur] backstop: ${blocked.code} appeared after a clean scan`);
-        disable(blocked.reason);
+        disable(blocked.reason, blocked.code);
         return Promise.resolve();
       }
       wrap();
@@ -491,7 +497,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
       });
     } catch (err) {
       swallow("runtime.captureMotionBlur.paint", err);
-      disable(err instanceof Error ? err.message : String(err));
+      disable(err instanceof Error ? err.message : String(err), "capture-failures");
       return Promise.resolve();
     }
   }
@@ -501,6 +507,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
     return {
       state: disabled ? "off" : "on",
       reason: disabled,
+      reasonCode: disabledCode,
       movers: movers.length,
       moverNames: movers.map(describe),
       scanMs,
@@ -511,9 +518,15 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
     };
   }
 
+  function probe(): Report {
+    if (!disabled) blockedByScan(host.now());
+    return report();
+  }
+
   return {
     root,
     paint,
+    probe,
     /** Paused in preview: show plain DOM so it can be selected. A render never rests. */
     rest: (): boolean => {
       if (rendering) return false;
@@ -563,27 +576,28 @@ export function initCaptureMotionBlur(host: CaptureMotionBlurHost): void {
     return;
   }
   const form = htmlInCanvasForm();
-  const reason = unsupportedReason(host.root);
-  if (!form || reason) {
+  const why = unsupported(host.root);
+  if (!form || why) {
+    const reason = why?.reason ?? null;
     console.info(`[motion-blur] off: ${reason} (Chrome ${chromeMajor() ?? "unknown"})`);
-    w.__hfMotionBlur = {
-      report: () => ({
-        state: "off",
-        reason,
-        movers: 0,
-        moverNames: [],
-        scanMs: 0,
-        shutterDeg: config.shutterDeg,
-        frames: 0,
-        meanMs: 0,
-        failures: 0,
-      }),
-    };
+    const report = (): Report => ({
+      state: "off",
+      reason,
+      reasonCode: why?.code ?? null,
+      movers: 0,
+      moverNames: [],
+      scanMs: 0,
+      shutterDeg: config.shutterDeg,
+      frames: 0,
+      meanMs: 0,
+      failures: 0,
+    });
+    w.__hfMotionBlur = { report, probe: report };
     return;
   }
   instance = createInstance(host, config, form);
   const current = instance;
-  w.__hfMotionBlur = { report: () => current.report() };
+  w.__hfMotionBlur = { report: () => current.report(), probe: () => current.probe() };
 }
 
 /**

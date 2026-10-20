@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PAGE_DEVICE_SCALE_GLOBAL, PAGE_MOTION_BLUR_OFF_GLOBAL } from "@hyperframes/core";
-import { installPageMotionBlur } from "./pageMotionBlur";
+import { describePageMotionBlur, installPageMotionBlur } from "./pageMotionBlur";
 
 const fakePage = () => ({ evaluateOnNewDocument: vi.fn(async () => ({ identifier: "1" })) });
 
@@ -52,5 +54,42 @@ describe("installPageMotionBlur", () => {
     const page = fakePage();
     await installPageMotionBlur(page, {});
     expect(page.evaluateOnNewDocument).not.toHaveBeenCalled();
+  });
+});
+
+describe("describePageMotionBlur", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  // Runs the page-side function in this process, with `window` standing in for the page.
+  const inPage = { evaluate: async (fn: () => unknown) => fn() } as never;
+
+  it("summarises the runtime's report in one line", async () => {
+    vi.stubGlobal("window", {
+      __hfMotionBlur: { report: () => ({ state: "off", reasonCode: "renderer-off", movers: 0 }) },
+    });
+    expect(await describePageMotionBlur(inPage)).toBe(
+      "[motion-blur] off reasonCode=renderer-off movers=0",
+    );
+  });
+
+  it("reports a running blur with its movers", async () => {
+    vi.stubGlobal("window", {
+      __hfMotionBlur: { report: () => ({ state: "on", reasonCode: null, movers: 24 }) },
+    });
+    expect(await describePageMotionBlur(inPage)).toBe("[motion-blur] on reasonCode=null movers=24");
+  });
+
+  it("says nothing when the page never asked for blur", async () => {
+    vi.stubGlobal("window", {});
+    expect(await describePageMotionBlur(inPage)).toBeNull();
+  });
+});
+
+describe("the per-session blur line", () => {
+  // Reachability: the line is only worth having if a capture session emits it once, after its first frame.
+  it("is logged from the frame capture core after a session's first frame", () => {
+    const source = readFileSync(join(__dirname, "frameCapture.ts"), "utf8");
+    expect(source).toMatch(
+      /capturePerf\.frames === 1\) \{\s*const blur = await describePageMotionBlur\(/,
+    );
   });
 });
