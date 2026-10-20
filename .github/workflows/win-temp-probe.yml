@@ -77,7 +77,7 @@ jobs:
           bun run --cwd packages/core build
 
       - name: Prepare browser for process tests
-                shell: pwsh
+        shell: pwsh
         run: node --import tsx packages/cli/scripts/prepare-process-test-browser.mjs
 
       - name: Disk and openssl probe
@@ -93,4 +93,3 @@ jobs:
         run: |
           if ("${{ matrix.temp }}" -eq "D") { $env:TEMP = $env:RUNNER_TEMP; $env:TMP = $env:RUNNER_TEMP }
           bun run --filter @hyperframes/engine --filter @hyperframes/cli test -- --maxWorkers=2
-
