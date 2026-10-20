@@ -85,8 +85,6 @@ const PAGE_STEP_CAP_MS = 30_000;
 
 export type PageStepOutcome<T> = { kind: "done"; value: T } | { kind: "timed-out" };
 
-// One in-page capture step, capped so a hung page cannot spend the whole capture budget. On
-// overrun a running page script is terminated; a step awaiting the network is abandoned.
 export async function runPageStep<T>(
   step: () => Promise<T>,
   opts: { label: string; stopPageScript: () => Promise<unknown>; capMs?: number },
