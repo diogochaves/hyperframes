@@ -659,6 +659,38 @@ describe("detectRenderModeHints", () => {
     expect(result.recommendScreenshot).toBe(true);
   });
 
+  it("routes a capture-motion-blur root to screenshot capture", () => {
+    const html = `<!DOCTYPE html>
+<html><body>
+  <div data-composition-id="root" data-motion-blur="on" data-width="1920" data-height="1080"></div>
+</body></html>`;
+
+    const result = detectRenderModeHints(html);
+
+    expect(result.reasons.map((reason) => reason.code)).toEqual(["captureMotionBlur"]);
+    expect(result.recommendScreenshot).toBe(true);
+  });
+
+  it("does not route a root whose motion blur is off", () => {
+    const html = `<!DOCTYPE html>
+<html><body>
+  <div data-composition-id="root" data-motion-blur="off" data-width="1920" data-height="1080"></div>
+</body></html>`;
+
+    expect(detectRenderModeHints(html).reasons).toEqual([]);
+  });
+
+  it("does not route a moving root that did not opt in", () => {
+    const tween = `<script>window.__timelines.main = gsap.timeline().to("#a", { x: 400 });</script>`;
+    const plain = `<div data-composition-id="root" data-width="1920" data-height="1080"></div>${tween}`;
+    expect(detectRenderModeHints(plain).reasons).toEqual([]);
+  });
+
+  it("does not route an opted-in root when the render turns page motion blur off", () => {
+    const html = `<div data-composition-id="root" data-motion-blur="on"></div>`;
+    expect(detectRenderModeHints(html, "off").reasons).toEqual([]);
+  });
+
   it("does not flag htmlInCanvas for plain canvas elements without layoutsubtree", () => {
     const html = `<!DOCTYPE html>
 <html><body>

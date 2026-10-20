@@ -3,13 +3,17 @@
  *
  * One scan: candidates are elements whose inline style changes or that a CSS / WAAPI animation
  * moves; they must reach MIN_SPEED px/frame outside any 3D context (the redraw is 2D), and only
- * the outermost of nested candidates is kept.
+ * the outermost of nested candidates is kept. A large element that is see-through while it moves
+ * (a sweep, a light leak) is no mover: its crop would carry the scene beneath it along its path.
  */
 
 import { isHtmlElement } from "../domRealm";
 
 /** Under this peak speed (px per frame) a smear is invisible, so the element stays sharp. */
 const MIN_SPEED = 2;
+
+/** A box this share of the scene or more holds other content, whatever sits in it. */
+const LARGE_SHARE = 0.5;
 
 /** Scan resolution: at most this many timeline samples, however long the composition. */
 const SCAN_STEPS = 240;
@@ -80,6 +84,30 @@ function pageAnimated(scene: Element): Set<HTMLElement> {
   return out;
 }
 
+// Alpha of a computed colour (`rgba(r, g, b, a)` or `rgb(r g b / a)`); 1 when it has none.
+function alphaOf(color: string): number {
+  const m = /^rgba\(.*,\s*([\d.]+)\)$/.exec(color) ?? /\/\s*([\d.]+)(%?)\s*\)$/.exec(color);
+  if (!m) return 1;
+  return m[2] ? Number(m[1]) / 100 : Number(m[1]);
+}
+
+/** Whether the element, on screen right now, lets what is beneath its box show through. */
+function seesThrough(el: HTMLElement, scene: Element): boolean {
+  let alpha = 1;
+  for (let n: Element | null = el; n && n !== scene; n = n.parentElement) {
+    alpha *= parseFloat(getComputedStyle(n).opacity);
+  }
+  if (alpha < 0.05) return false;
+  if (alpha < 0.99) return true;
+  if (/^(IMG|VIDEO|CANVAS|PICTURE)$/.test(el.tagName)) return false;
+  const cs = getComputedStyle(el);
+  if (alphaOf(cs.backgroundColor) >= 0.99) return false;
+  if (cs.backgroundImage === "none") return true;
+  return [...cs.backgroundImage.matchAll(/rgba\([^)]*,\s*([\d.]+)\)/g)].some(
+    (m) => Number(m[1]) < 0.99,
+  );
+}
+
 /** How far a box's farthest-moving edge travelled between two reads; 0 when either is empty. */
 function edgeShift(a: DOMRect | undefined, b: DOMRect | undefined): number {
   if (!a || !b || !a.width || !b.width) return 0;
@@ -102,6 +130,9 @@ export function discoverMovers({ scene, durationSeconds, fps, seek }: DiscoverOp
   const framesPerStep = frames / steps;
   const fast = new Set<HTMLElement>();
   const threeD = new Set<HTMLElement>();
+  const seeThrough = new Set<HTMLElement>();
+  const sceneRect = scene.getBoundingClientRect();
+  const largeArea = sceneRect.width * sceneRect.height * LARGE_SHARE;
   let prev: Array<DOMRect | undefined> | null = null;
 
   for (let i = 0; i <= steps; i++) {
@@ -112,14 +143,20 @@ export function discoverMovers({ scene, durationSeconds, fps, seek }: DiscoverOp
       if (!dynamic.has(el) && styleKey(el) === first[j]) return;
       dynamic.add(el);
       rects[j] = el.getBoundingClientRect();
-      if (edgeShift(prev?.[j], rects[j]) / framesPerStep >= MIN_SPEED) fast.add(el);
+      if (edgeShift(prev?.[j], rects[j]) / framesPerStep < MIN_SPEED) return;
+      fast.add(el);
+      const box = rects[j];
+      if (box && largeArea > 0 && box.width * box.height >= largeArea && seesThrough(el, scene))
+        seeThrough.add(el);
     });
     // Style reads up the chain are the costly part; every 10th step is enough to see a 3D turn.
     if (i % 10 === 0 || i === steps) for (const el of fast) if (in3d(el, scene)) threeD.add(el);
     prev = rects;
   }
 
-  const candidates = all.filter((el) => fast.has(el) && !threeD.has(el) && !optedOut(el, scene));
+  const candidates = all.filter(
+    (el) => fast.has(el) && !threeD.has(el) && !seeThrough.has(el) && !optedOut(el, scene),
+  );
   const movers = candidates.filter((el) => !candidates.some((o) => o !== el && o.contains(el)));
   return { movers, dynamic };
 }

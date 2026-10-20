@@ -38,6 +38,7 @@ import { isDevMode } from "../utils/env.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
 import type { ProjectLintResult } from "@hyperframes/lint";
 import { resolveRenderBrowser } from "../browser/preflight.js";
+import { renderPageMotionBlur } from "../utils/pageMotionBlur.js";
 import {
   createStudioManualEditsRenderBodyScript,
   createStudioApi,
@@ -642,6 +643,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             ...(opts.videoFrameFormat ? { videoFrameFormat: opts.videoFrameFormat } : {}),
             ...(opts.hdrMode ? { hdrMode: opts.hdrMode } : {}),
             ...(opts.useGpu ? { useGpu: true } : {}),
+            pageMotionBlur: renderPageMotionBlur(opts.previewMotionBlur),
           });
           renderJob = job;
           const onProgress = (j: { progress: number; currentStage?: string }) => {

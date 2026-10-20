@@ -785,6 +785,32 @@ describe("POST /projects/:id/render — telemetryDistinctId forwarding", () => {
     }
   });
 
+  // WYSIWYG: the browser says whether its preview could blur; only a boolean is a signal.
+  it.each([
+    [false, false],
+    [true, true],
+    ["false", undefined],
+    [undefined, undefined],
+  ])("forwards previewMotionBlur %s as %s", async (flag, expected) => {
+    const spy = vi.fn();
+    const { app, cleanup } = buildApp(spy);
+    try {
+      await app.request("http://localhost/projects/demo/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          fps: 30,
+          quality: "standard",
+          format: "mp4",
+          previewMotionBlur: flag,
+        }),
+      });
+      expect(spy.mock.calls[0][0].previewMotionBlur).toBe(expected);
+    } finally {
+      cleanup();
+    }
+  });
+
   // An old client omits the flag, and a non-boolean is not a signal either.
   // Defaulting those to "opted out" would silently drop every pre-upgrade
   // render outcome.

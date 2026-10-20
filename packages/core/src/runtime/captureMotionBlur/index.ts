@@ -11,7 +11,11 @@
  * Needs html-in-canvas (`drawElementImage`); without it nothing changes.
  */
 
-import { PAGE_MOTION_BLUR_OFF_GLOBAL, supportsCaptureMotionBlur } from "../../pageMotionBlur";
+import {
+  PAGE_DEVICE_SCALE_GLOBAL,
+  PAGE_MOTION_BLUR_OFF_GLOBAL,
+  supportsCaptureMotionBlur,
+} from "../../pageMotionBlur";
 import { swallow } from "../diagnostics";
 import { createCompositor, type MoverFrame } from "./composite";
 import { discoverMovers } from "./discover";
@@ -156,10 +160,16 @@ function rootSize(root: HTMLElement): { width: number; height: number } {
   return { width: Math.max(1, Math.round(w)), height: Math.max(1, Math.round(h)) };
 }
 
+function readDpr(): number {
+  const injected = Number((window as unknown as Record<string, unknown>)[PAGE_DEVICE_SCALE_GLOBAL]);
+  const dpr = injected > 0 ? injected : window.devicePixelRatio;
+  return Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+}
+
 function makeCanvas(width: number, height: number, role: string): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = Math.max(1, Math.round(width * readDpr()));
+  canvas.height = Math.max(1, Math.round(height * readDpr()));
   canvas.setAttribute("data-hf-ignore", "");
   canvas.setAttribute("data-hf-motion-blur", role);
   // ponytail: assumes the root sits at its parent's origin (true for compositions); place the
@@ -181,7 +191,8 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
   if (!captureContext || !outputContext) throw new Error("capture motion blur: no 2D context");
   const sctx: DrawElementContext = captureContext;
   const octx: CanvasRenderingContext2D = outputContext;
-  const compositor = createCompositor(width, height);
+  let dpr = readDpr();
+  let compositor = createCompositor(width, height, dpr);
   // Hides movers for the background capture without touching author or GSAP opacity.
   const hideRule = document.createElement("style");
   hideRule.setAttribute("data-hf-ignore", "");
@@ -302,9 +313,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
       done = captureAndDraw(job, finalStep);
       failures = 0;
     } catch (err) {
-      failures++;
-      swallow("runtime.captureMotionBlur.compose", err);
-      if (failures >= MAX_FAILURES) disable(`capture failed ${failures} times in a row`);
+      onCaptureFailure(err);
     }
     job.ms += performance.now() - t0;
     if (!done && !disabled) {
@@ -314,6 +323,14 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
     timings.push(sampleMs + job.ms);
     if (timings.length > 600) timings.shift();
     finishJob(job);
+  }
+
+  function onCaptureFailure(err: unknown): void {
+    failures++;
+    swallow("runtime.captureMotionBlur.compose", err);
+    // A render never gives up mid-video: this frame shows the plain DOM, the next wraps again.
+    if (rendering) unwrap();
+    else if (failures >= MAX_FAILURES) disable(`capture failed ${failures} times in a row`);
   }
 
   /** This paint's half of the frame; false when the background capture is still to come. */
@@ -392,8 +409,21 @@ function createInstance(host: CaptureMotionBlurHost, config: Config) {
     return start(t, engineMode);
   }
 
+  function syncDensity(): void {
+    const next = readDpr();
+    if (next === dpr) return;
+    dpr = next;
+    for (const canvas of [src, out]) {
+      canvas.width = Math.max(1, Math.round(width * dpr));
+      canvas.height = Math.max(1, Math.round(height * dpr));
+    }
+    compositor = createCompositor(width, height, dpr);
+    staleOutput = true;
+  }
+
   function start(t: number, engineMode: boolean): Promise<void> {
     try {
+      syncDensity();
       if (!reader || host.timeline() !== scannedTimeline) discover(t);
       if (movers.length === 0) {
         unwrap();
